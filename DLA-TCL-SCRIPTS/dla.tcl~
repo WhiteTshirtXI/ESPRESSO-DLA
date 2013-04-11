@@ -1,0 +1,137 @@
+# Very basic diffusion limited aggregation example
+# 1. Place a fixed particle in the middle of the simulation box as a seed of the cluster 
+# 2. Add a diffusing particle to the system
+# 3. When it collides with the cluster, make it stick
+# 4. Go back to step 2
+
+# This is a basic example for 3d, demonstrating
+# * Collision detection / dynamic bonding
+# * Doing something on the tcl level, when a collision occurs
+
+# The script does not safeguard against the cluster exceeding the box size
+# Make the box big enough.
+
+
+# Setting some parameters
+
+# box length
+set box_l 20.0
+# Integrator
+set dt 0.01
+set skin 1
+set cells [expr 10*10*10]
+# Thermostat
+set T 1
+set gamma 1
+# Particle interactions
+set r 0.5
+set ljEps 1
+set ljSigma [expr 2. *$r*pow(2,1./6.)]
+set ljCut [expr 2. *$r]
+
+# Cluster growing params
+
+# Number of particles in the dla cluster
+set N 28
+set curid 1
+set i 0
+# Integration steps to wait until a new particle collides with the cluster
+set intSteps 100000
+
+# MD setup
+setmd box_l $box_l $box_l $box_l
+setmd time_step $dt
+setmd skin $skin
+setmd max_num_cells $cells
+thermostat langevin $T $gamma
+setmd periodic 0 0 0
+
+# setup lennard jones
+inter 0 0 lennard-jones $ljEps $ljSigma $ljCut auto
+
+# Bond to mark collided particles and stick them to each other
+inter 1 angle 200 [PI]
+inter 0 harmonic 200 1.0
+
+# Turn on collision detection
+# Tell it to throw an exception, once particles have collided
+on_collision exception bind_at_point_of_collision 1.0 0 1 1
+
+# Place central particle
+set center [expr $box_l /2]
+part 0 pos $center $center $center fix 1 1 1 
+
+# Main loop
+while { $curid<$N } {
+ 
+ # New particles are introduced on a spherical surface around the cluster
+ # Find out the maximum radius of the cluster
+ set rMax 0.
+ set rC "$center $center $center"
+ puts "all particles in the system [setmd n_part]"
+ for {set j 1} {$j < [setmd n_part]} {incr j} {
+  # Distance of particle j to central particle
+  set vr [vecsub [part $j print folded_position] $rC]
+  set r [expr sqrt([vecdot_product $vr $vr])]
+  if {$r > $rMax} {
+   set rMax $r
+  }
+ }
+ puts "Setp $i, Max Radius $rMax, box size $box_l, min. dist [analyze mindist 0 0]" 
+ incr i
+ # Create particle on a sphere with distance $rMax+delta
+ set delta 1
+
+ # Draw random coordinate on the sphere
+ set costheta [expr 2*[expr [t_random]] - 1]
+ set sintheta [expr sin(acos($costheta))]
+ set phi [expr 2*3.1415926536*[expr [t_random]]] 
+
+ # Draw random particle position depending on dimensionallity
+
+ set x [expr $center + $sintheta*cos($phi)*($rMax+$delta)]
+ set y [expr $center + $sintheta*sin($phi)*($rMax+$delta)]
+ set z [expr $center +$costheta*($rMax +$delta)]
+ 
+ 
+ # Create particle 
+
+ part $curid pos $x $y $z
+puts "new particle is created particle $curid pos $x $y $z"
+puts " "
+# Integrate. We use catch to find out whether an exception occurred
+set e ""
+set res [ catch {integrate $intSteps} e] 
+puts "Control for the collision --> $res"
+# Check, if the new particle collided with the cluster, i.e., if an exception was throuwn
+if {$res==0} {
+ puts "The particle didn't collide with the cluster. Trying a new one"
+ # Decrease step counter
+ part $curid delete
+set curid [setmd n_part]
+ # Skip the rest of this iteration
+} else {
+
+# Check if the exception is related to something different than collisions
+# Maybe, someone pressed ctrl+c
+# The exception is a text message. Here, it is parsed
+set x [lindex $e 2]
+if { [lrange $x 0 2] != "collision between particles" } {
+ # It was something else than a collision. Print error message and exit
+ puts $e
+ exit
+}
+
+set curid [setmd n_part]
+
+# Fix the particle that collided with the cluster
+# part [expr $i+1] fix 1 1 1
+
+}
+}
+
+# Save cluster to a vtf file
+set f [open output.vtf w]
+writevsf $f
+writevcf $f folded
+close $f
